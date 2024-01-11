@@ -1,0 +1,204 @@
+CS 699 Data Mining Project Data Preprocessing Work\
+By: Tejas Yogesh Pawar
+
+```{r}
+data <- read.csv("Project_dataset.csv")
+head(data)
+```
+
+Data Exploration
+
+```{r}
+# Summary statistics for the dataset
+summary(data)
+
+```
+
+Step1: Outlier Detection and Handling
+
+```{r}
+
+# Step 1: Detect Outliers
+outliers_count <- sapply(data[, -ncol(data)], function(x) {
+  Q1 <- quantile(x, 0.25)
+  Q3 <- quantile(x, 0.75)
+  IQR <- Q3 - Q1
+  sum(x < Q1 - 1.5*IQR | x > Q3 + 1.5*IQR)
+})
+
+# Sort the outlier count in descending order
+outliers_sorted <- sort(outliers_count, decreasing = TRUE)
+
+# Display the columns with the most outliers
+print(head(outliers_sorted, 10))
+```
+
+Visualise these outlier columns
+
+```{r}
+par(mfrow=c(2,3))
+for(col in names(head(outliers_sorted, 5))) {
+  boxplot(data[[col]], main=col, col="lightblue", horizontal=TRUE)
+}
+```
+
+removing outliers
+
+```{r}
+# Step 3: Remove Outliers
+# Identify rows with outliers
+outliers_mask <- apply(data[, -ncol(data)], 1, function(x) {
+  any(x < quantile(x, 0.25) - 1.5*IQR(x) | x > quantile(x, 0.75) + 1.5*IQR(x))
+})
+
+# Remove rows with outliers
+cleaned_data <- data[!outliers_mask,]
+cleaned_data
+```
+
+```{r}
+# Display the original and cleaned data dimensions
+print(paste("Original data dimensions: ", dim(data)))
+print(paste("Cleaned data dimensions: ", dim(cleaned_data)))
+```
+
+Now let's try using the Z-score method
+
+```{r}
+library(dplyr)
+
+# Z-Score Method for Outlier Removal
+remove_outliers_zscore <- function(data, threshold = 3) {
+  # Compute Z-scores
+  z_scores <- scale(data)
+  
+  # Identify Outliers
+  outliers <- apply(z_scores, 1, function(x) any(abs(x) > threshold))
+  
+  # Remove Outliers
+  data_clean <- data[!outliers, ]
+  
+  return(data_clean)
+}
+
+data_clean <- remove_outliers_zscore(data)
+
+#
+# Display the original and cleaned data dimensions
+cat("Original data dimensions: ", dim(data))
+cat("Cleaned data dimensions: ", dim(data_clean))
+
+```
+
+Step2: Removed Low Variance Features\
+
+```{r}
+# Identify features with zero variance
+zero_var_features <- which(apply(data, 2, var) == 0)
+
+# View the names of features to be removed
+names(data)[zero_var_features]
+
+# Remove features with zero variance
+data <- data[,-zero_var_features]
+data
+
+```
+
+```{r}
+# Display data dimensions after removing low variance features
+print(paste("Original data dimensions: ", dim(data)))
+
+```
+
+Step3: Removed Highly Correlated Features
+
+```{r}
+
+
+# Load the library
+library(corrplot)
+
+# Compute the correlation matrix
+correlation_matrix <- cor(data)
+
+# Plot the heatmap
+corrplot(correlation_matrix, method="color", type="upper", order="hclust", 
+         tl.col="black", tl.srt=45)
+
+```
+
+```{r}
+library(caret)  # Ensure the library is loaded
+highly_correlated <- findCorrelation(correlation_matrix, cutoff = 0.95)
+
+# View the names of features to be removed
+names(data)[highly_correlated]
+
+# Remove highly correlated features
+data <- data[,-highly_correlated]
+
+# Display data dimensions after removing highly correlated features
+print(paste("Original data dimensions: ", dim(data)))
+```
+
+\
+Step4: Remove Additional Low Variance Features
+
+```{r}
+# Identify features with variance below 0.02
+low_var_features <- which(apply(data, 2, var) < 0.02)
+
+# View the names of features to be removed
+names(data)[low_var_features]
+
+# Remove features with low variance
+data <- data[,-low_var_features]
+# Display data dimensions after removing low variance features
+print(paste("data dimensions after removing low variance features: ", dim(data)))
+
+```
+
+Step5: Remove Additional Features Based on the correlation with Target Variable
+
+```{r}
+data_initial = read.csv("project_dataset.csv")
+
+
+# Compute correlation between features and target variable
+correlation_with_target <- sapply(data[,-ncol(data)], function(x) cor(x, data_initial$o_bullied))
+
+# Identify features with absolute correlation below 0.01 with the target variable
+low_corr_with_target_features <- which(abs(correlation_with_target) < 0.01)
+
+# View the names of features to be removed
+names(data)[low_corr_with_target_features]
+
+# Remove features with low correlation with the target variable
+data <- data[,-low_corr_with_target_features]
+
+# Display data dimensions after removing low variance features
+print(paste("data dimensions after removin additional features based on the correlation with Target Variable: ", dim(data)))
+```
+
+\
+Step6: Re-evaluate and add back some important feature.
+
+```{r}
+# Identify features to add back based on highest absolute correlation with target variable
+features_to_add_back <- low_corr_with_target_features[order(abs(correlation_with_target[low_corr_with_target_features]), decreasing = TRUE)[1:7]]
+
+# View the names of features to be added back
+names(data_initial)[features_to_add_back]
+
+# Add back the selected features
+data <- cbind(data, data_initial[, features_to_add_back])
+print(paste("data dimensions after Re-evaluateing and add back some important feature: ", dim(data)))
+```
+
+\
+Step7: Saving the preprocessed data.
+
+```{r}
+write.csv(data, file = "PreprocessedDataFile.csv", row.names = FALSE)
+```

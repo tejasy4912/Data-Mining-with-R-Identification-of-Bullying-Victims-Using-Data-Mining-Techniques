@@ -1,0 +1,526 @@
+```{r}
+library(caret)
+library(DMwR)
+library(tidyverse)
+library(dplyr)
+library(randomForest)
+library(glmnet)
+library(rpart)
+library(gbm)
+library(e1071)
+library(class)
+library(naivebayes)
+library(nnet)
+library(pROC)
+```
+
+```{r}
+# Load your data
+data <- read.csv("PreprocessedDataFile.csv")
+head(data)
+# Make sure the class column is a factor
+data$o_bullied <- as.factor(data$o_bullied)
+```
+
+```{r}
+
+# Split data into training and testing sets with stratified sampling
+set.seed(42)  # for reproducibility
+splitIndex <- createDataPartition(data$o_bullied, p = .80, list = FALSE, times = 1)
+trainData <- data[splitIndex,]
+testData <- data[-splitIndex,]
+```
+
+```{r}
+# Check class distribution in the training set
+table(trainData$o_bullied)
+```
+
+```{r}
+write.csv(trainData, "withoutSampling.csv", row.names = FALSE)
+```
+
+```{r}
+# Balance the training set using SMOTE
+trainDataBalanced <- SMOTE(o_bullied ~ ., data = trainData, perc.over = 100, k = 5)
+
+```
+
+```{r}
+# Check the class distribution after balancing
+table(trainDataBalanced$o_bullied)
+```
+
+```{r}
+# Write the balanced training data to a CSV file
+write.csv(trainDataBalanced, "balanced_trainData.csv", row.names = FALSE)
+
+```
+
+```{r}
+write.csv(testData, "testData.csv", row.names = FALSE)
+```
+
+```{r}
+# Split the data into features and target variable
+target <- trainDataBalanced$o_bullied
+features <- trainDataBalanced[, !names(trainDataBalanced) %in% 'o_bullied']
+```
+
+```{r}
+# Use the 'anova' function to calculate F-values for each feature
+anova_results <- data.frame(feature = names(features), F_value = NA, p_value = NA)
+
+for (i in 1:ncol(features)) {
+  model <- aov(features[, i] ~ target)
+  anova_results[i, 'F_value'] <- summary(model)[[1]]['F value']
+  anova_results[i, 'p_value'] <- summary(model)[[1]]['Pr(>F)']
+}
+
+# Sort features by p-value or F-value
+anova_results <- anova_results %>% arrange(p_value)
+
+# Select the top features based on the F-value or p-value
+top_features <- anova_results %>% filter(p_value < 0.05) # for example, select features with p-value less than 0.05
+
+# Output the top features
+print(top_features)
+```
+
+```{r}
+# Select the top 50 features based on the lowest p-values
+anova_top50_features <- head(anova_results, 50)
+
+# Output the top 50 features
+print(anova_top50_features)
+
+```
+
+```{r}
+# Define the control using a random forest model
+ctrl <- rfeControl(functions=rfFuncs, method="cv", number=10)
+
+# Perform RFE
+result <- rfe(features, target, sizes=c(1:ncol(features)), rfeControl=ctrl)
+
+# Display the result
+print(result)
+
+# Display the selected features
+print(predictors(result))
+
+```
+
+```{r}
+
+
+# Ensure that the features are in a matrix format for glmnet
+X <- as.matrix(features)
+
+# Standardize the predictors (glmnet will do this by default)
+X <- scale(X)
+
+# Fit the LASSO model using cross-validation to determine the best lambda
+set.seed(123)  # for reproducibility
+cv_model <- cv.glmnet(X, target, alpha = 1, family = "binomial")  # Use "binomial" for classification
+
+# Plot the cross-validated error as a function of lambda
+plot(cv_model)
+
+# Extract the lambda value that minimizes the cross-validation error
+best_lambda <- cv_model$lambda.min
+
+# Fit the final LASSO model using the best lambda
+final_model <- glmnet(X, target, alpha = 1, lambda = best_lambda, family = "binomial")
+
+# Display the coefficients - non-zero coefficients are selected by the LASSO
+print(coef(final_model))
+
+```
+
+```{r}
+# Extract the coefficients
+lasso_coef <- coef(final_model, s = best_lambda)
+# Convert to a data frame, keeping only non-zero coefficients (features selected by LASSO)
+non_zero_coef <- lasso_coef[lasso_coef[, 1] != 0, , drop = FALSE]
+feature_names <- row.names(non_zero_coef)
+
+# Create a data frame of feature names and their corresponding coefficients
+feature_importance <- data.frame(
+  feature = feature_names[-1],  # The first entry is the intercept
+  coefficient = non_zero_coef[-1]  # Exclude the intercept for feature importance
+)
+
+# Sort by the absolute value of coefficients
+feature_importance <- feature_importance[order(abs(feature_importance$coefficient), decreasing = TRUE), ]
+
+# Select the top 50 features
+lasso_top50_features <- head(feature_importance, 50)
+
+# Print the top features
+print(lasso_top50_features)
+
+```
+
+```{r}
+# Standardize the features. This is an important step for PCA.
+features_scaled <- scale(features)
+
+# Perform PCA on the features
+pca_result <- prcomp(features_scaled, center = TRUE, scale. = TRUE)
+
+# Print summary of the PCA to see how much variance is explained by each component
+summary(pca_result)
+
+# Plot the PCA to inspect the variance explained by each principal component
+plot(pca_result, type = "l")
+```
+
+\
+
+```{r}
+# Extract the feature names from the ANOVA results
+anova_feature_names <- anova_top50_features$feature
+
+# Extract the feature names from the LASSO results
+
+# where [-1] is used to exclude the intercept term
+lasso_feature_names <- lasso_top50_features$feature
+
+# Find the common features between the two vectors of feature names
+common_features <- intersect(anova_feature_names, lasso_feature_names)
+
+# Print the common features
+print(common_features)
+
+```
+
+```{r}
+selected_columns <- c(common_features, "o_bullied")
+train_data <- trainDataBalanced[selected_columns]
+test_data <- testData[selected_columns]
+```
+
+```{r}
+write.csv(train_data, "train_data.csv", row.names = FALSE)
+write.csv(test_data, "test_data.csv", row.names = FALSE)
+
+```
+
+### **Logistic Regression**
+
+```{r}
+
+model_logreg <- glm(o_bullied ~ ., data=train_data, family=binomial)
+predictions_logreg <- predict(model_logreg, newdata=test_data[-ncol(test_data)], type='response')
+predictions_logreg <- ifelse(predictions_logreg > 0.5, 1, 0)
+accuracy_logreg <- mean(predictions_logreg == test_data$o_bullied)
+accuracy_logreg 
+confusionMatrix(factor(predictions_logreg, levels = c(0, 1)), factor(test_data$o_bullied, levels = c(0, 1)))
+
+```
+
+```{r}
+
+# Load the pROC package
+library(pROC)
+
+
+
+# Calculate ROC curves and AUC for class 0, class 1, and weighted average
+roc_class0 <- roc(response = ifelse(test_data$o_bullied == 0, 1, 0), predictor = predictions_logreg)
+roc_class1 <- roc(response = ifelse(test_data$o_bullied == 1, 1, 0), predictor = predictions_logreg)
+roc_weighted <- roc(response = test_data$o_bullied, predictor = predictions_logreg, levels = c(0, 1))
+
+# Calculate the AUC values
+auc_class0 <- auc(roc_class0)
+auc_class1 <- auc(roc_class1)
+auc_weighted <- auc(roc_weighted)
+
+# Print the AUC values
+cat("AUC for Class 0:", auc_class0, "\n")
+cat("AUC for Class 1:", auc_class1, "\n")
+cat("Weighted Average AUC:", auc_weighted, "\n")
+
+
+```
+
+### **Decision Trees**
+
+```{r}
+
+model_tree <- rpart(o_bullied ~ ., data=train_data, method="class")
+predictions_tree <- predict(model_tree, newdata=test_data[-ncol(test_data)], type="class")
+accuracy_tree <- mean(predictions_tree == test_data$o_bullied)
+confusionMatrix(factor(predictions_tree, levels = c(0, 1)), factor(test_data$o_bullied, levels = c(0, 1)))
+
+
+```
+
+```{r}
+# Load the pROC package
+library(pROC)
+
+# Get the predicted class probabilities
+predictions_tree <- predict(model_tree, newdata=test_data[-ncol(test_data)], type="class")
+
+# Create a binary indicator for class 1
+class_1_indicator <- ifelse(test_data$o_bullied == 1, 1, 0)
+
+# Calculate ROC curves for class 0 and class 1
+roc_class0_tree <- roc(response = 1 - class_1_indicator, predictor = as.numeric(predictions_tree == 0))
+roc_class1_tree <- roc(response = class_1_indicator, predictor = as.numeric(predictions_tree == 1))
+
+# Calculate the weighted average ROC curve
+roc_weighted_tree <- roc(response = test_data$o_bullied, predictor = as.numeric(predictions_tree == 1), levels = c(0, 1), multi.weights = c(1-sum(test_data$o_bullied)/length(test_data$o_bullied), sum(test_data$o_bullied)/length(test_data$o_bullied)))
+
+# Calculate the AUC values
+auc_class0_tree <- auc(roc_class0_tree)
+auc_class1_tree <- auc(roc_class1_tree)
+auc_weighted_tree <- auc(roc_weighted_tree)
+
+# Print the AUC values
+cat("AUC for Class 0 (Decision Tree):", auc_class0_tree, "\n")
+cat("AUC for Class 1 (Decision Tree):", auc_class1_tree, "\n")
+cat("Weighted Average AUC (Decision Tree):", auc_weighted_tree, "\n")
+
+
+```
+
+### **Random Forest**
+
+```{r}
+
+
+model_rf <- randomForest(o_bullied ~ ., data=train_data, ntree=1000)
+predictions_rf <- predict(model_rf, newdata=test_data[-ncol(test_data)])
+accuracy_rf <- mean(predictions_rf == test_data$o_bullied)
+confusionMatrix(factor(predictions_rf, levels = c(0, 1)), factor(test_data$o_bullied, levels = c(0, 1)))
+
+
+```
+
+```{r}
+# Load the pROC package
+library(pROC)
+
+# Make predictions on the test data
+predictions_rf <- predict(model_rf, newdata=test_data[-ncol(test_data)])
+
+# Create a binary indicator for class 1
+class_1_indicator <- ifelse(test_data$o_bullied == 1, 1, 0)
+
+# Calculate ROC curves for class 0 and class 1
+roc_class0_rf <- roc(response = 1 - class_1_indicator, predictor = as.numeric(predictions_rf == 0))
+roc_class1_rf <- roc(response = class_1_indicator, predictor = as.numeric(predictions_rf == 1))
+
+# Calculate the weighted average ROC curve
+roc_weighted_rf <- roc(response = test_data$o_bullied, predictor = as.numeric(predictions_rf == 1), levels = c(0, 1), multi.weights = c(1-sum(test_data$o_bullied)/length(test_data$o_bullied), sum(test_data$o_bullied)/length(test_data$o_bullied)))
+
+# Calculate the AUC values
+auc_class0_rf <- auc(roc_class0_rf)
+auc_class1_rf <- auc(roc_class1_rf)
+auc_weighted_rf <- auc(roc_weighted_rf)
+
+# Print the AUC values
+cat("AUC for Class 0 (Random Forest):", auc_class0_rf, "\n")
+cat("AUC for Class 1 (Random Forest):", auc_class1_rf, "\n")
+cat("Weighted Average AUC (Random Forest):", auc_weighted_rf, "\n")
+
+```
+
+### **Gradient Boosting Machine (GBM)**
+
+```{r}
+
+# Split features and target
+train_features <- train_data[, -which(names(train_data) == "o_bullied")]
+train_target <- train_data[, "o_bullied"]
+test_features <- test_data[, -which(names(test_data) == "o_bullied")]
+test_target <- test_data[, "o_bullied"]
+
+# Train GBM model
+set.seed(123) # for reproducibility
+model_gbm <- gbm(o_bullied ~ ., data=train_data, distribution="bernoulli", n.trees=100, verbose=FALSE)
+
+# Predict on test data
+predictions_gbm <- predict(model_gbm, newdata=test_features, n.trees=100, type="response")
+predictions_gbm <- ifelse(predictions_gbm > 0.5, 1, 0)
+
+# Convert predictions and actual values to factors with levels 0 and 1
+predictions_gbm_factor <- factor(predictions_gbm, levels = c(0, 1))
+actual_values_factor <- factor(test_target, levels = c(0, 1))
+
+# Calculate the confusion matrix
+conf_matrix_gbm <- confusionMatrix(predictions_gbm_factor, actual_values_factor)
+print(conf_matrix_gbm)
+
+```
+
+### **Support Vector Machine (SVM)**
+
+```{r}
+
+
+model_svm <- svm(o_bullied ~ ., data=train_data, probability=TRUE)
+predictions_svm <- predict(model_svm, newdata=test_data[-ncol(test_data)])
+accuracy_svm <- mean(predictions_svm == test_data$o_bullied)
+confusionMatrix(factor(predictions_svm, levels = c(0, 1)), factor(test_data$o_bullied, levels = c(0, 1)))
+
+```
+
+```{r}
+# Load the pROC package
+library(pROC)
+
+# Make predictions on the test data
+predictions_svm <- predict(model_svm, newdata=test_data[-ncol(test_data)])
+
+# Create a binary indicator for class 1
+class_1_indicator <- ifelse(test_data$o_bullied == 1, 1, 0)
+
+# Calculate ROC curves for class 0 and class 1
+roc_class0_svm <- roc(response = 1 - class_1_indicator, predictor = as.numeric(predictions_svm == 0))
+roc_class1_svm <- roc(response = class_1_indicator, predictor = as.numeric(predictions_svm == 1))
+
+# Calculate the weighted average ROC curve
+roc_weighted_svm <- roc(response = test_data$o_bullied, predictor = as.numeric(predictions_svm == 1), levels = c(0, 1), multi.weights = c(1-sum(test_data$o_bullied)/length(test_data$o_bullied), sum(test_data$o_bullied)/length(test_data$o_bullied)))
+
+# Calculate the AUC values
+auc_class0_svm <- auc(roc_class0_svm)
+auc_class1_svm <- auc(roc_class1_svm)
+auc_weighted_svm <- auc(roc_weighted_svm)
+
+# Print the AUC values
+cat("AUC for Class 0 (SVM):", auc_class0_svm, "\n")
+cat("AUC for Class 1 (SVM):", auc_class1_svm, "\n")
+cat("Weighted Average AUC (SVM):", auc_weighted_svm, "\n")
+
+```
+
+### **K-Nearest Neighbors (KNN)**
+
+```{r}
+
+
+
+predictions_knn <- knn(train=train_data[-ncol(train_data)], test=test_data[-ncol(test_data)], cl=train_data$o_bullied, k=5)
+accuracy_knn <- mean(predictions_knn == test_data$o_bullied)
+confusionMatrix(factor(predictions_knn, levels = c(0, 1)), factor(test_data$o_bullied, levels = c(0, 1)))
+
+```
+
+```{r}
+# Load the pROC package
+library(pROC)
+
+# Make predictions on the test data
+predictions_knn <- knn(train = train_data[-ncol(train_data)], test = test_data[-ncol(test_data)], cl = train_data$o_bullied, k = 5)
+
+# Create a binary indicator for class 1
+class_1_indicator <- ifelse(test_data$o_bullied == 1, 1, 0)
+
+# Calculate ROC curves for class 0 and class 1
+roc_class0_knn <- roc(response = 1 - class_1_indicator, predictor = as.numeric(predictions_knn == 0))
+roc_class1_knn <- roc(response = class_1_indicator, predictor = as.numeric(predictions_knn == 1))
+
+# Calculate the weighted average ROC curve
+roc_weighted_knn <- roc(response = test_data$o_bullied, predictor = as.numeric(predictions_knn == 1), levels = c(0, 1), multi.weights = c(1 - sum(test_data$o_bullied) / length(test_data$o_bullied), sum(test_data$o_bullied) / length(test_data$o_bullied)))
+
+# Calculate the AUC values
+auc_class0_knn <- auc(roc_class0_knn)
+auc_class1_knn <- auc(roc_class1_knn)
+auc_weighted_knn <- auc(roc_weighted_knn)
+
+# Print the AUC values
+cat("AUC for Class 0 (k-NN):", auc_class0_knn, "\n")
+cat("AUC for Class 1 (k-NN):", auc_class1_knn, "\n")
+cat("Weighted Average AUC (k-NN):", auc_weighted_knn, "\n")
+
+
+```
+
+### **Naive Bayes**
+
+```{r}
+
+
+model_nb <- naive_bayes(o_bullied ~ ., data=train_data)
+predictions_nb <- predict(model_nb, newdata=test_data[-ncol(test_data)])
+accuracy_nb <- mean(predictions_nb == test_data$o_bullied)
+confusionMatrix(factor(predictions_nb, levels = c(0, 1)), factor(test_data$o_bullied, levels = c(0, 1)))
+
+```
+
+```{r}
+# Load the pROC package
+library(pROC)
+
+# Make predictions on the test data
+predictions_nb <- predict(model_nb, newdata=test_data[-ncol(test_data)])
+
+# Create a binary indicator for class 1
+class_1_indicator <- ifelse(test_data$o_bullied == 1, 1, 0)
+
+# Calculate ROC curves for class 0 and class 1
+roc_class0_nb <- roc(response = 1 - class_1_indicator, predictor = as.numeric(predictions_nb == 0))
+roc_class1_nb <- roc(response = class_1_indicator, predictor = as.numeric(predictions_nb == 1))
+
+# Calculate the weighted average ROC curve
+roc_weighted_nb <- roc(response = test_data$o_bullied, predictor = as.numeric(predictions_nb == 1), levels = c(0, 1), multi.weights = c(1 - sum(test_data$o_bullied) / length(test_data$o_bullied), sum(test_data$o_bullied) / length(test_data$o_bullied)))
+
+# Calculate the AUC values
+auc_class0_nb <- auc(roc_class0_nb)
+auc_class1_nb <- auc(roc_class1_nb)
+auc_weighted_nb <- auc(roc_weighted_nb)
+
+# Print the AUC values
+cat("AUC for Class 0 (Naive Bayes):", auc_class0_nb, "\n")
+cat("AUC for Class 1 (Naive Bayes):", auc_class1_nb, "\n")
+cat("Weighted Average AUC (Naive Bayes):", auc_weighted_nb, "\n")
+
+```
+
+### **Neural Network**
+
+```{r}
+
+
+# Normalize your data before training the neural network
+model_nn <- nnet(o_bullied ~ ., data=train_data, size=5, linout=FALSE, maxit=1000)
+predictions_nn <- predict(model_nn, newdata=test_data[-ncol(test_data)], type="class")
+accuracy_nn <- mean(predictions_nn == test_data$o_bullied)
+confusionMatrix(factor(predictions_nn, levels = c(0, 1)), factor(test_data$o_bullied, levels = c(0, 1)))
+
+
+
+```
+
+```{r}
+# Load the pROC package
+library(pROC)
+
+# Make predictions on the test data
+predictions_nn <- predict(model_nn, newdata=test_data[-ncol(test_data)], type="class")
+
+# Create a binary indicator for class 1
+class_1_indicator <- ifelse(test_data$o_bullied == 1, 1, 0)
+
+# Calculate ROC curves for class 0 and class 1
+roc_class0_nn <- roc(response = 1 - class_1_indicator, predictor = as.numeric(predictions_nn == 0))
+roc_class1_nn <- roc(response = class_1_indicator, predictor = as.numeric(predictions_nn == 1))
+
+# Calculate the weighted average ROC curve
+roc_weighted_nn <- roc(response = test_data$o_bullied, predictor = as.numeric(predictions_nn == 1), levels = c(0, 1), multi.weights = c(1 - sum(test_data$o_bullied) / length(test_data$o_bullied), sum(test_data$o_bullied) / length(test_data$o_bullied)))
+
+# Calculate the AUC values
+auc_class0_nn <- auc(roc_class0_nn)
+auc_class1_nn <- auc(roc_class1_nn)
+auc_weighted_nn <- auc(roc_weighted_nn)
+
+# Print the AUC values
+cat("AUC for Class 0 (Neural Network):", auc_class0_nn, "\n")
+cat("AUC for Class 1 (Neural Network):", auc_class1_nn, "\n")
+cat("Weighted Average AUC (Neural Network):", auc_weighted_nn, "\n")
+
+```
